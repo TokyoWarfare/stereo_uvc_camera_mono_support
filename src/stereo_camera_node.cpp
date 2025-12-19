@@ -25,6 +25,27 @@ StereoCameraNode::StereoCameraNode(NodePtr& main_node, NodePtr& private_node)
     enable_rectification_ = true;
     show_rectification_visual_ = true;
     rectification_maps_initialized_ = false;
+    monocular_ = false;
+    
+    // Declare parameters (required in ROS2 Humble+)
+	private_node_->declare_parameter<int>("device_index", device_index_);
+	private_node_->declare_parameter<int>("width", width_);
+	private_node_->declare_parameter<int>("height", height_);
+	private_node_->declare_parameter<int>("fps", fps_);
+	private_node_->declare_parameter<bool>("use_mjpeg", use_mjpeg_);
+	private_node_->declare_parameter<float>("split_ratio", split_ratio_);
+	private_node_->declare_parameter<std::string>("left_camera_name", left_camera_name_);
+	private_node_->declare_parameter<std::string>("right_camera_name", right_camera_name_);
+	private_node_->declare_parameter<std::string>("left_frame_id", left_frame_id_);
+	private_node_->declare_parameter<std::string>("right_frame_id", right_frame_id_);
+	private_node_->declare_parameter<std::string>("left_camera_info_url", left_camera_info_url_);
+	private_node_->declare_parameter<std::string>("right_camera_info_url", right_camera_info_url_);
+	private_node_->declare_parameter<std::string>("left_image_topic", left_image_topic_);
+	private_node_->declare_parameter<std::string>("right_image_topic", right_image_topic_);
+	private_node_->declare_parameter<bool>("enable_rectification", enable_rectification_);
+	private_node_->declare_parameter<bool>("show_rectification_visual", show_rectification_visual_);
+	private_node_->declare_parameter<bool>("monocular", monocular_);
+
     
     get_param(private_node_, "device_index", device_index_);
     get_param(private_node_, "width", width_);
@@ -42,7 +63,16 @@ StereoCameraNode::StereoCameraNode(NodePtr& main_node, NodePtr& private_node)
     get_param(private_node_, "right_image_topic", right_image_topic_);
     get_param(private_node_, "enable_rectification", enable_rectification_);
     get_param(private_node_, "show_rectification_visual", show_rectification_visual_);
+    get_param(private_node_, "monocular", monocular_);    
     
+    //Monocular mode    
+    if (monocular_) {
+    enable_rectification_ = false;
+    show_rectification_visual_ = false;
+    logInfo("Monocular mode enabled: rectification and visualization disabled.");
+    }
+
+
     // Get package path for calibration files
     std::string pkg_path = get_package_share_directory("stereo_camera_ros");
     std::string left_calib_path = "file://" + pkg_path + "/config/left_camera.yaml";
@@ -67,22 +97,26 @@ StereoCameraNode::StereoCameraNode(NodePtr& main_node, NodePtr& private_node)
         left_camera_node, left_camera_name_, left_camera_info_url_);
     right_camera_info_manager_ = std::make_shared<CameraInfoManager>(
         right_camera_node, right_camera_name_, right_camera_info_url_);
-        
-    // Set image publishers
+    
+    if (!monocular_) {    
+	// Set image publishers
     left_img_pub_ = create_image_publisher(private_node_, left_image_topic_, 1);
     right_img_pub_ = create_image_publisher(private_node_, right_image_topic_, 1);
-    
-    // Set rectified image publishers
-    left_rect_img_pub_ = create_image_publisher(private_node_, left_image_topic_+"_rect", 1);
-    right_rect_img_pub_ = create_image_publisher(private_node_, right_image_topic_+"_rect", 1);
-    
+        
     // Set camera info publishers
     left_info_pub_ = create_publisher<CameraInfo>(private_node_, "left/camera_info", 1);
     right_info_pub_ = create_publisher<CameraInfo>(private_node_, "right/camera_info", 1); 
+	}
+	
+	else{
+    // Mono Publishers
+    mono_img_pub_ = create_image_publisher(private_node_, "camera/image_raw", 1);
+	}
     
     // Initialize camera
     camera_.reset(new StereoCamera());
     camera_->setStereoSplitRatio(split_ratio_);
+    camera_->setMonocularMode(monocular_);
     
     // Open camera
     logInfo("Opening camera, parameters: width=" + std::to_string(width_) + 
@@ -116,23 +150,36 @@ StereoCameraNode::StereoCameraNode(NodePtr& main_node, NodePtr& private_node)
 }
 
 StereoCameraNode::~StereoCameraNode() {
-    // Stop processing thread
+    // Signal all threads to stop processing
     running_ = false;
-    frame_condition_.notify_all();
-    
-    // Wait for processing thread to end
-    if (processing_thread_.joinable()) {
-        processing_thread_.join();
-    }
-    
-    // Close camera
+
+    // Close the camera first to stop incoming callbacks immediately
     if (camera_) {
         camera_->close();
     }
-    
-    logInfo("Stereo camera node closed. Statistics: Processed " + std::to_string(processed_frames_.load()) + 
-            " frames, Dropped " + std::to_string(dropped_frames_.load()) + " frames");
+
+    // Clear any remaining frames in the buffer
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        frame_buffer_.clear();
+    }
+
+    // Wake up the processing thread if it is waiting on the condition variable
+    frame_condition_.notify_all();
+
+    // Wait for the processing thread to finish cleanly
+    if (processing_thread_.joinable()) {
+        processing_thread_.join();
+    }
+
+    // Log final statistics
+    logInfo("Stereo camera node closed. Statistics: Processed " +
+            std::to_string(processed_frames_.load()) +
+            " frames, Dropped " +
+            std::to_string(dropped_frames_.load()) +
+            " frames");
 }
+
 
 void StereoCameraNode::timerCallback() {
     if (camera_ && camera_->isOpened()) {

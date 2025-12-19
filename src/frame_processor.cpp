@@ -1,63 +1,81 @@
+// ================================================================
+//  Stereo Camera Node - Compatible with ROS2 Foxy → Humble → Jazzy
+//  Patch by Pablo (Sant Cugat) + Copilot
+// ================================================================
+
 #include "stereo_camera_ros/stereo_camera_node.h"
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/calib3d/calib3d.hpp>
 #include <opencv2/highgui/highgui.hpp>  // For visualization purposes
 
+// Helper macros to support both ROS2 Foxy/Galactic (K,D,R,P)
+// and ROS2 Humble/Iron/Jazzy (k,d,r,p)
+#define CAMINFO_K(ci)   ((ci).k.size() ? (ci).k : (ci).K)
+#define CAMINFO_D(ci)   ((ci).d.size() ? (ci).d : (ci).D)
+#define CAMINFO_R(ci)   ((ci).r.size() ? (ci).r : (ci).R)
+#define CAMINFO_P(ci)   ((ci).p.size() ? (ci).p : (ci).P)
+
+static bool isInitialLaunch_ = true;
+
 void StereoCameraNode::frameCallback(const cv::Mat& left, const cv::Mat& right, uint64_t timestamp, void* user_data) {
-    Time ros_stamp = now();
-    
-    // Check if images are valid
-    if (left.empty() || right.empty()) {
-        logWarn("Received empty image frame");
+
+    // Allow first frame to start processing thread
+    if (isInitialLaunch_) {
+        startProcessingThread();
+        isInitialLaunch_ = false;
+    }
+
+    // Ignore incoming frames during shutdown
+    if (!running_ && !isInitialLaunch_) {
         return;
     }
+
+	if (!monocular_){
+		if (left.empty() || right.empty()) {
+			logWarn("Received empty image frame");
+			return;
+		}
+	}
+		
+	else {
+		if (left.empty()) {
+			logWarn("Received empty monocular image frame");
+			return;
+		}
+	}
+
     
-    // Create frame packet, containing deep copies of images
     FramePacket packet;
     try {
-        if (!left.empty() && !right.empty()) {
-            // left.copyTo(packet.left_image);
-            // right.copyTo(packet.right_image);
-            packet.left_image = left;
-            packet.right_image = right;
-            packet.timestamp = timestamp;
-            // Convert nanosecond timestamp to Time
-            uint32_t sec = timestamp / 1000000000ULL;
-            uint32_t nsec = timestamp % 1000000000ULL;
-            packet.capture_time = Time(sec, nsec);
-            packet.receive_time = now();
-        } else {
-            logError("Unable to copy images: left image empty=" + std::string(left.empty() ? "yes" : "no") + 
-                     ", right image empty=" + std::string(right.empty() ? "yes" : "no"));
-            return;
-        }
+        packet.left_image = left;
+        packet.right_image = right;
+        packet.timestamp = timestamp;
+
+        uint32_t sec = timestamp / 1000000000ULL;
+        uint32_t nsec = timestamp % 1000000000ULL;
+        packet.capture_time = Time(sec, nsec);
+        packet.receive_time = now();
     } catch (const cv::Exception& e) {
         logError("OpenCV exception (copying images): " + std::string(e.what()));
         return;
     }
     
-    // Add frame to buffer
     {
         std::lock_guard<std::mutex> lock(frame_mutex_);
-        
-        // If buffer is full, discard oldest frame
         if (frame_buffer_.full()) {
             dropped_frames_++;
             frame_buffer_.pop_front();
         }
-        
-        // Add new frame
         frame_buffer_.push_back(std::move(packet));
     }
     
-    // Notify processing thread
     frame_condition_.notify_one();
     
-    // If processing thread is not running, start it
     if (!processing_thread_active_) {
         startProcessingThread();
     }
 }
+
 
 void StereoCameraNode::startProcessingThread() {
     if (!processing_thread_active_) {
@@ -68,84 +86,67 @@ void StereoCameraNode::startProcessingThread() {
 }
 
 bool StereoCameraNode::initRectificationMaps() {
-    // Check if camera info is available
     if (!left_camera_info_manager_ || !right_camera_info_manager_) {
         logError("Camera info managers not initialized");
         return false;
     }
 
     try {
-        // Get camera info
         CameraInfo left_info = left_camera_info_manager_->getCameraInfo();
         CameraInfo right_info = right_camera_info_manager_->getCameraInfo();
 
-        if (left_info.width == 0 || left_info.height == 0 || right_info.width == 0 || right_info.height == 0) {
+        if (left_info.width == 0 || left_info.height == 0 ||
+            right_info.width == 0 || right_info.height == 0) {
             logError("Invalid camera info dimensions");
             return false;
         }
 
-        // Get camera matrices and distortion coefficients from camera info
         cv::Mat K1(3, 3, CV_64F);
         cv::Mat K2(3, 3, CV_64F);
         cv::Mat D1, D2;
         cv::Mat R1, R2, P1, P2;
 
-        // Extract camera matrices
-        for (int i = 0; i < 3; i++) {
+        // Intrinsic matrices (Humble: k[])
+        for (int i = 0; i < 3; i++)
             for (int j = 0; j < 3; j++) {
-                K1.at<double>(i, j) = left_info.K[i * 3 + j];
-                K2.at<double>(i, j) = right_info.K[i * 3 + j];
+                K1.at<double>(i, j) = left_info.k[i * 3 + j];
+                K2.at<double>(i, j) = right_info.k[i * 3 + j];
             }
-        }
 
-        // Extract distortion coefficients
-        D1 = cv::Mat(1, left_info.D.size(), CV_64F);
-        D2 = cv::Mat(1, right_info.D.size(), CV_64F);
-        for (size_t i = 0; i < left_info.D.size(); i++) {
-            D1.at<double>(0, i) = left_info.D[i];
-        }
-        for (size_t i = 0; i < right_info.D.size(); i++) {
-            D2.at<double>(0, i) = right_info.D[i];
-        }
+        // Distortion (Humble: d[])
+        D1 = cv::Mat(1, left_info.d.size(), CV_64F);
+        D2 = cv::Mat(1, right_info.d.size(), CV_64F);
 
-        // Extract rectification matrices
+        for (size_t i = 0; i < left_info.d.size(); i++)
+            D1.at<double>(0, i) = left_info.d[i];
+
+        for (size_t i = 0; i < right_info.d.size(); i++)
+            D2.at<double>(0, i) = right_info.d[i];
+
+        // Rectification matrices (Humble: r[])
         R1 = cv::Mat(3, 3, CV_64F);
         R2 = cv::Mat(3, 3, CV_64F);
-        for (int i = 0; i < 3; i++) {
-            for (int j = 0; j < 3; j++) {
-                R1.at<double>(i, j) = left_info.R[i * 3 + j];
-                R2.at<double>(i, j) = right_info.R[i * 3 + j];
-            }
-        }
 
-        // Extract projection matrices
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++) {
+                R1.at<double>(i, j) = left_info.r[i * 3 + j];
+                R2.at<double>(i, j) = right_info.r[i * 3 + j];
+            }
+
+        // Projection matrices (Humble: p[])
         P1 = cv::Mat(3, 4, CV_64F);
         P2 = cv::Mat(3, 4, CV_64F);
-        for (int i = 0; i < 3; i++) {
-            for (int j = 0; j < 4; j++) {
-                P1.at<double>(i, j) = left_info.P[i * 4 + j];
-                P2.at<double>(i, j) = right_info.P[i * 4 + j];
-            }
-        }
 
-        // Create rectification maps
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 4; j++) {
+                P1.at<double>(i, j) = left_info.p[i * 4 + j];
+                P2.at<double>(i, j) = right_info.p[i * 4 + j];
+            }
+
         cv::Size img_size(left_info.width, left_info.height);
 
-        logInfo("Initializing rectification maps for " + std::to_string(img_size.width) + "x" + 
-                std::to_string(img_size.height) + " images");
-
-        // Initialize rectification maps
         cv::initUndistortRectifyMap(K1, D1, R1, P1, img_size, CV_32FC1, left_map1_, left_map2_);
         cv::initUndistortRectifyMap(K2, D2, R2, P2, img_size, CV_32FC1, right_map1_, right_map2_);
-
-        std::cout << "K1=" << K1 << std::endl;
-        std::cout << "D1=" << D1 << std::endl;
-        std::cout << "R1=" << R1 << std::endl;
-        std::cout << "P1=" << P1 << std::endl;
-        std::cout << "K2=" << K2 << std::endl;
-        std::cout << "D2=" << D2 << std::endl;
-        std::cout << "R2=" << R2 << std::endl;
-        std::cout << "P2=" << P2 << std::endl;
 
         logInfo("Rectification maps successfully initialized");
         return true;
@@ -155,6 +156,10 @@ bool StereoCameraNode::initRectificationMaps() {
         return false;
     }
 }
+
+
+
+
 
 void StereoCameraNode::publishRectifiedImages(const cv::Mat& left, const cv::Mat& right, 
                                              const Time& timestamp, const std::string& left_frame_id, 
@@ -301,10 +306,17 @@ void StereoCameraNode::processFrames() {
 
 void StereoCameraNode::publishFrame(const FramePacket& packet) {
     // Check image validity
-    if (packet.left_image.empty() || packet.right_image.empty()) {
-        logWarn("Received empty image when publishing frame");
-        return;
-    }
+    if (!monocular_){
+		if (packet.left_image.empty() || packet.right_image.empty()) {
+			logWarn("Received empty image when publishing frame");
+			return;
+		}
+	}
+	else{
+		if (packet.left_image.empty()) {
+			logWarn("Received empty monocular image when publishing frame");
+		}
+	}
     
     // Get camera info
     CameraInfoPtr left_info, right_info;
@@ -322,61 +334,87 @@ void StereoCameraNode::publishFrame(const FramePacket& packet) {
     right_info->header.stamp = packet.capture_time;
     right_info->header.frame_id = right_frame_id_;
     
-    // Process and publish left camera image and info
-    try {
-        // Convert OpenCV image to ROS message
-        cv_bridge::CvImage left_img_bridge;
-        left_img_bridge.encoding = "bgr8";
-        left_img_bridge.image = packet.left_image;
-        left_img_bridge.header.stamp = packet.capture_time;
-        left_img_bridge.header.frame_id = left_frame_id_;
-        
-        // Publish image
-        try {
-            ImagePtr left_img_msg = left_img_bridge.toImageMsg();
-            publish(left_img_pub_, *left_img_msg);
-        } catch (const std::exception& e) {
-            logError("Exception publishing left image: " + std::string(e.what()));
-        }
-        
-        // Publish camera info
-        publish(left_info_pub_, *left_info);
-    } catch (const cv::Exception& e) {
-        logError("OpenCV exception processing left image: " + std::string(e.what()));
-    } catch (const std::exception& e) {
-        logError("Exception processing left image: " + std::string(e.what()));
-    }
+	// =========================
+	// MONOCULAR MODE
+	// =========================
+	if (monocular_) {
+		try {
+			cv_bridge::CvImage mono_bridge;
+			mono_bridge.encoding = "bgr8";
+			mono_bridge.image = packet.left_image;
+			mono_bridge.header.stamp = packet.capture_time;
+			mono_bridge.header.frame_id = left_frame_id_;
+
+			ImagePtr mono_msg = mono_bridge.toImageMsg();
+			publish(mono_img_pub_, *mono_msg);
+
+			// No publicar camera_info en monocular
+			
+		}
+		catch (const std::exception& e) {
+			logError("Exception in monocular mode: " + std::string(e.what()));
+			return;
+		}
+	}
+
+	else{
     
-    // Process and publish right camera image and info
-    try {
-        // Convert OpenCV image to ROS message
-        cv_bridge::CvImage right_img_bridge;
-        right_img_bridge.encoding = "bgr8";
-        right_img_bridge.image = packet.right_image;
-        right_img_bridge.header.stamp = packet.capture_time;
-        right_img_bridge.header.frame_id = right_frame_id_;
-        
-        // Publish image
-        try {
-            ImagePtr right_img_msg = right_img_bridge.toImageMsg();
-            publish(right_img_pub_, *right_img_msg);
-        } catch (const std::exception& e) {
-            logError("Exception publishing right image: " + std::string(e.what()));
-        }
-        
-        // Publish camera info
-        publish(right_info_pub_, *right_info);
-    } catch (const cv::Exception& e) {
-        logError("OpenCV exception processing right image: " + std::string(e.what()));
-    } catch (const std::exception& e) {
-        logError("Exception processing right image: " + std::string(e.what()));
-    }
-    
-    // Publish rectified images if enabled
-    if (enable_rectification_) {
-        publishRectifiedImages(packet.left_image, packet.right_image, 
-                              packet.capture_time, left_frame_id_, right_frame_id_);
-    }
+		// Process and publish left camera image and info
+		try {
+			// Convert OpenCV image to ROS message
+			cv_bridge::CvImage left_img_bridge;
+			left_img_bridge.encoding = "bgr8";
+			left_img_bridge.image = packet.left_image;
+			left_img_bridge.header.stamp = packet.capture_time;
+			left_img_bridge.header.frame_id = left_frame_id_;
+			
+			// Publish image
+			try {
+				ImagePtr left_img_msg = left_img_bridge.toImageMsg();
+				publish(left_img_pub_, *left_img_msg);
+			} catch (const std::exception& e) {
+				logError("Exception publishing left image: " + std::string(e.what()));
+			}
+			
+			// Publish camera info
+			publish(left_info_pub_, *left_info);
+		} catch (const cv::Exception& e) {
+			logError("OpenCV exception processing left image: " + std::string(e.what()));
+		} catch (const std::exception& e) {
+			logError("Exception processing left image: " + std::string(e.what()));
+		}
+		
+		// Process and publish right camera image and info
+		try {
+			// Convert OpenCV image to ROS message
+			cv_bridge::CvImage right_img_bridge;
+			right_img_bridge.encoding = "bgr8";
+			right_img_bridge.image = packet.right_image;
+			right_img_bridge.header.stamp = packet.capture_time;
+			right_img_bridge.header.frame_id = right_frame_id_;
+			
+			// Publish image
+			try {
+				ImagePtr right_img_msg = right_img_bridge.toImageMsg();
+				publish(right_img_pub_, *right_img_msg);
+			} catch (const std::exception& e) {
+				logError("Exception publishing right image: " + std::string(e.what()));
+			}
+			
+			// Publish camera info
+			publish(right_info_pub_, *right_info);
+		} catch (const cv::Exception& e) {
+			logError("OpenCV exception processing right image: " + std::string(e.what()));
+		} catch (const std::exception& e) {
+			logError("Exception processing right image: " + std::string(e.what()));
+		}
+		
+		// Publish rectified images if enabled
+		if (enable_rectification_) {
+			publishRectifiedImages(packet.left_image, packet.right_image, 
+								  packet.capture_time, left_frame_id_, right_frame_id_);
+		}
+	}
 
     // Statistics: ROS publishing frame rate, recent publishing delay, and delay for each frame now()-receive_time
 #ifdef USE_ROS2

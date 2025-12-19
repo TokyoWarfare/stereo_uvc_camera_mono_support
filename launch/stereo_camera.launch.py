@@ -12,6 +12,12 @@ def generate_launch_description():
     use_mjpeg = LaunchConfiguration('use_mjpeg', default='true')
     split_ratio = LaunchConfiguration('split_ratio', default='0.5')
     
+    enable_rectification = LaunchConfiguration('enable_rectification', default='true')
+    show_rectification_visual = LaunchConfiguration('show_rectification_visual', default='true')
+    
+    monocular = LaunchConfiguration('monocular', default='false')
+    
+    
     left_camera_name = LaunchConfiguration('left_camera_name', default='left_camera')
     right_camera_name = LaunchConfiguration('right_camera_name', default='right_camera')
     left_frame_id = LaunchConfiguration('left_frame_id', default='left_camera_optical_frame')
@@ -93,6 +99,24 @@ def generate_launch_description():
         'right_camera_info_url',
         default_value='',
         description='URL to right camera calibration file')
+        
+    declare_enable_rectification = DeclareLaunchArgument(
+        'enable_rectification',
+        default_value='true',
+        description='Enable or disable image rectification')
+
+    declare_show_rectification_visual = DeclareLaunchArgument(
+        'show_rectification_visual',
+        default_value='true',
+        description='Show rectification visualization window')
+        
+    declare_monocular = DeclareLaunchArgument(
+        'monocular',
+        default_value='false',
+        description='Enable monocular mode (no split, no rectification)'
+)
+
+
     
     # launch camera node
     stereo_camera_node = Node(
@@ -114,7 +138,12 @@ def generate_launch_description():
             'left_image_topic': left_image_topic,
             'right_image_topic': right_image_topic,
             'left_camera_info_url': left_camera_info_url,
-            'right_camera_info_url': right_camera_info_url
+            'right_camera_info_url': right_camera_info_url,
+            'enable_rectification': enable_rectification,
+            'show_rectification_visual': show_rectification_visual,
+            'monocular': monocular
+
+
         }]
     )
     
@@ -133,5 +162,9 @@ def generate_launch_description():
         declare_right_image_topic,
         declare_left_camera_info_url,
         declare_right_camera_info_url,
-        stereo_camera_node
+        stereo_camera_node,
+        declare_enable_rectification,
+        declare_show_rectification_visual,
+        declare_monocular
+
     ])

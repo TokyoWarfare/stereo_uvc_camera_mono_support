@@ -47,12 +47,18 @@ private:
     std::string right_camera_info_url_;
     std::string left_image_topic_;
     std::string right_image_topic_;
+    bool monocular_ = false;
+
     
-    // ROS publishers
-    ImagePublisher left_img_pub_;
-    ImagePublisher right_img_pub_;
-    Publisher<CameraInfo> left_info_pub_;
-    Publisher<CameraInfo> right_info_pub_;
+	// ROS publishers
+	ImagePublisher left_img_pub_;
+	ImagePublisher right_img_pub_;
+	Publisher<CameraInfo> left_info_pub_;
+	Publisher<CameraInfo> right_info_pub_;
+
+	// MONOCULAR publisher
+	ImagePublisher mono_img_pub_;
+
     
     // Rectified image publishers
     ImagePublisher left_rect_img_pub_;

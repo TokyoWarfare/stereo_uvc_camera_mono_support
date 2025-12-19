@@ -142,6 +142,10 @@ public:
      */
     size_t getQueueLength() const;
     
+    //monocular
+    void setMonocularMode(bool m) { monocular_mode_ = m; }
+
+    
 private:
     // Camera parameters
     int m_width;
@@ -149,6 +153,9 @@ private:
     int m_fps;
     bool m_use_mjpeg;
     float m_split_ratio;  // Stereo split ratio
+    
+    //Monocular
+    bool monocular_mode_ = false;
     
     // UVC related variables
     uvc_context_t* m_ctx;
@@ -221,6 +228,9 @@ private:
     // Disable copy constructor and assignment operator
     StereoCamera(const StereoCamera&) = delete;
     StereoCamera& operator=(const StereoCamera&) = delete;
+    
+   
+
 };
 
 #endif // STEREO_CAMERA_HPP

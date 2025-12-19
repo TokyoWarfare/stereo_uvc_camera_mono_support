@@ -355,9 +355,16 @@ void StereoCamera::workerThread() {
         }
         
         // Split into left and right eye images
-        cv::Mat left_frame, right_frame;
-        splitStereoFrame(full_frame, left_frame, right_frame);
-        auto t4 = std::chrono::steady_clock::now();
+		cv::Mat left_frame, right_frame;
+
+		if (monocular_mode_) {
+			// No split → usar imagen completa
+			left_frame = full_frame;
+			right_frame = cv::Mat();  // o cv::Mat() si prefieres
+		} else {
+			splitStereoFrame(full_frame, left_frame, right_frame);
+		}
+		
         
         // Update latest frame cache
         {
