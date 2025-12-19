@@ -1,3 +1,29 @@
+
+LAUNCH  MONOCULAR MODE LIKE:
+USING  LAUNCH.PY
+ros2 launch stereo_camera_ros stereo_camera.launch.py width:=3840 height:=2160 fps:=60 device_index:=0 mjpeg:=true enable_rectification:=false show_rectification_visual:=true monocular:=true
+ 
+
+USING CAMERA NODE ARGS:
+ros2 run stereo_camera_ros stereo_camera_node \
+  --ros-args \
+  -p width:=3840 \
+  -p height:=2160 \
+  -p fps:=60 \
+  -p mjpeg:=true \
+  -p device_index:=0 \
+  -p enable_rectification:=false \
+  -p show_rectification_visual:=true \
+  -p monocular:=true
+
+*AS OF NOW, 
+-p enable_rectification:=false \
+  -p show_rectification_visual:=true \
+  will allways be false in monocular mode, regardless of param value.
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
 # Stereo UVC Camera
 
 [简体中文](README.md) | English
